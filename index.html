@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>李棒棒今天做什么吃呀</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // 简易 Markdown 渲染函数（用于美化聊天输出）
+        function simpleMarkdownToHtml(markdown) {
+            // 1. 替换粗体 (**text**)
+            let html = markdown.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            // 2. 替换标题 (## text)
+            html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+            html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+            // 3. 替换列表 (* item)
+            html = html.replace(/^\* (.*$)/gim, '<li>$1</li>');
+            // 4. 将换行符转换为 <br>
+            html = html.replace(/\n/g, '<br>');
+
+            // 如果有列表项，将其包裹在 ul 标签中（简易处理）
+            if (html.includes('<li>')) {
+                // 找到第一个 <li> 标签之前的内容
+                const preList = html.substring(0, html.indexOf('<li>'));
+                // 找到最后一个 </li> 标签之后的内容
+                const postList = html.substring(html.lastIndexOf('</li>') + 5);
+                // 提取列表部分，并包裹 ul
+                const listContent = html.substring(html.indexOf('<li>'), html.lastIndexOf('</li>') + 5);
+                html = preList + '<ul>' + listContent + '</ul>' + postList;
+                // 移除 ul 标签内多余的 <br> 标签
+                html = html.replace(/<br>(?=<\/?ul>)/g, '');
+            }
+
+            return html;
+        }
+
+        // ----------------------------------------------------
+        // **工程师提示：请将您的 API Key 粘贴在下面引号内！**
+        // ----------------------------------------------------
+        const GEMINI_API_KEY = "AIzaSyBOP4r7A-OEkgojrzhFhO0R-ERAUp9S7qA";
+
+        import { GoogleGenAI } from "https://esm.run/@google/genai";
+        const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+        // --- 核心功能 I: 图片识别与食谱生成 ---
+
+        // 一个辅助函数：将用户上传的文件转为 Base64 字符串
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result.split(',')[1]);
+                reader.onerror = error => reject(error);
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function generateRecipe() {
+            // 获取用户上传的文件
+            const fileInput = document.getElementById('imageUpload');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                alert("请先上传一张照片！");
+                return;
+            }
+
+            document.getElementById('resultArea').innerHTML = '正在分析食材和生成食谱，请稍候...';
+            document.getElementById('loadingSpinner').classList.remove('hidden');
+
+            try {
+                // 1. 将文件转换为 Base64 格式
+                const base64Image = await fileToBase64(file);
+
+                // 2. 构造 AI 请求：发送图片和文本指令
+                const response = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: [
+                        {
+                            role: "user", parts: [
+                                {
+                                    text: `请充当一个专业的中文美食家和经验丰富的家庭厨师。我已上传了我的冰箱食材照片或超市小票照片。请根据图片中识别出的食材，执行以下任务：
+
+                                1. **食材识别：** 详细列出图片中所有识别出的食材清单。
+                                2. **食谱建议（多选）：** **基于这些食材，请推荐至少 3 道、最多 5 道** 在中国家庭中**常见、经典且美味**的菜谱。菜谱推荐必须**主要**使用已识别的食材。请确保每道菜谱的“主要食材”字段中**必须包含**从图片中识别出的食材列表。请**避免**推荐不常见或搭配奇怪的菜谱。
+                                3. **输出格式：** 仅输出一个 JSON 对象数组，**必须使用 \`\`\`json 和 \`\`\` 包裹整个数组**，不要包含任何额外的说明文字。
+
+                                JSON 结构必须是一个包含多个食谱对象的数组（中文）：
+                                \`\`\`json
+                                [
+                                  {
+                                    "食谱名称": "菜名",
+                                    "主要食材": ["list item 1", "list item 2", "请确保这里有内容"], 
+                                    "食谱做法": "详细的步骤说明",
+                                    "口味与特点": "简短描述这道菜的口味或特点 (如：清淡爽口，下饭神器)"
+                                  }
+                                ]
+                                \`\`\`
+                                `
+                                },
+                                {
+                                    inlineData: {
+                                        data: base64Image,
+                                        mimeType: file.type
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                });
+
+                // 3. 终极解析 AI 的回复：使用正则表达式提取 JSON 块并尝试解析（容错修复）
+                const rawText = response.text.trim();
+                let jsonString = '';
+
+                // 尝试查找 Markdown JSON 代码块标记 (```json ... ```)
+                const match = rawText.match(/```json\s*([\s\S]*?)\s*```/);
+
+                if (match && match[1]) {
+                    // 如果找到 Markdown 代码块，提取其中的内容
+                    jsonString = match[1].trim();
+                } else {
+                    // 如果没有找到 Markdown 代码块，尝试上次的逻辑来截取中括号
+                    const startIndex = rawText.indexOf('[');
+                    const endIndex = rawText.lastIndexOf(']');
+
+                    if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+                        jsonString = rawText.substring(startIndex, endIndex + 1);
+                    } else {
+                        // 如果连中括号都找不到，报错，并打印原始回复以供调试
+                        console.error("原始回复未包含明显的JSON数组结构:", rawText);
+                        throw new Error(`AI回复格式错误，未检测到有效的JSON数组。请确保AI输出的第一个字符是'[', 最后一个字符是']'。原始回复：\n${rawText.substring(0, 300)}...`);
+                    }
+                }
+
+                const recipesArray = JSON.parse(jsonString);
+
+                // 4. 将结果显示给用户
+                let htmlContent = `<div class="bg-white p-6 rounded-xl shadow-lg border border-green-200">
+                    <h2 class="text-3xl font-extrabold text-green-600 mb-6">为您推荐 ${recipesArray.length} 道家常菜！</h2>
+                `;
+
+                // 循环遍历每一个食谱
+                recipesArray.forEach((recipeData, index) => {
+                    htmlContent += `
+                        <div class="mb-8 p-6 border border-gray-100 rounded-lg shadow-md hover:shadow-lg transition duration-300">
+                            <h3 class="text-2xl font-bold mb-3 text-red-600">
+                                ${index + 1}. 😋 ${recipeData["食谱名称"]} 
+                                ${
+                        // 容错修复 1: 只有当 '口味与特点' 存在且不为空时才显示
+                        recipeData["口味与特点"]
+                            ? `<span class="text-sm font-normal text-gray-500 ml-2">(${recipeData["口味与特点"]})</span>`
+                            : ''
+                        }
+                            </h3>
+                            
+                        
+                            
+                            <div class="mb-4">
+                                <h4 class="text-lg font-semibold border-b pb-1 mb-2 text-gray-700"> 主要食材</h4>
+                                <ul class="list-disc list-inside ml-4 text-gray-600">
+                                    ${
+                        // 容错修复 2: 确保 '主要食材' 是数组且有内容，否则显示提示
+                        Array.isArray(recipeData["主要食材"]) && recipeData["主要食材"].length > 0
+                            ? recipeData["主要食材"].map(item => `<li>${item}</li>`).join('')
+                            : '<li>未提供具体的食材清单，请参考食谱做法。</li>'
+                        }
+                                </ul>
+                            </div>
+                            
+                            <div>
+    <h4 class="text-lg font-semibold border-b pb-1 mb-2 text-gray-700">👨‍🍳 详细做法</h4>
+    <p class="text-gray-600"> 
+        ${
+                        // 容错修复 3: 将做法按数字编号分段显示
+                        recipeData["食谱做法"]
+                            ? recipeData["食谱做法"]
+                                .replace(/(\d+\.\s*)/g, '<br>$1') // 在每个步骤前加 <br>
+                                .trim()
+                                .replace(/^<br>/, '') // ❗ 修改点 2：删除开头第一个 <br>，消除首行大空隙
+                            : '未提供详细做法。'
+                        }
+    </p>
+</div>
+                        </div>
+                    `;
+                });
+
+                htmlContent += '</div>';
+                document.getElementById('resultArea').innerHTML = htmlContent;
+
+            } catch (error) {
+                console.error("生成食谱时发生错误:", error);
+                document.getElementById('resultArea').innerHTML = `
+                    <div class="text-red-600 p-4 border border-red-300 rounded-lg">
+                        抱歉，处理您的请求时出现错误。请检查您的 API 密钥是否正确，或尝试上传一张更清晰的图片。
+                        <br>错误信息：${error.message}
+                    </div>
+                `;
+            } finally {
+                document.getElementById('loadingSpinner').classList.add('hidden');
+            }
+        }
+
+
+        // --- 核心功能 II: 智能问答推荐 ---
+
+        // 1. 初始化 Chat 客户端（使用 chat 会话来保持上下文）
+        const chat = ai.chats.create({
+            model: "gemini-2.5-flash", // 聊天也用这个高性能模型
+            config: {
+                systemInstruction: "你是一个专业的中文美食顾问，擅长根据用户的心情、偏好和场合推荐家常菜谱，并提供详细的采购清单。保持温暖、友好的语气。每次回复时，如果用户尚未确定菜品，请继续提问以缩小范围（如：今天想吃肉还是素？），如果用户确定了菜品，请直接给出菜谱和采购清单，并使用中文Markdown格式。"
+            }
+        });
+
+        // 2. Tab 切换逻辑
+        document.querySelectorAll('.tab-button').forEach(button => {
+            button.addEventListener('click', (e) => {
+                const targetId = e.currentTarget.getAttribute('data-target');
+
+                // 隐藏所有内容区域，移除所有 tab 的激活样式
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.add('hidden');
+                });
+                document.querySelectorAll('.tab-button').forEach(btn => {
+                    btn.classList.remove('border-green-500', 'text-green-600');
+                    btn.classList.add('border-transparent', 'text-gray-500', 'hover:border-gray-300', 'hover:text-gray-700');
+                });
+
+                // 显示目标区域，添加激活样式
+                document.getElementById(targetId).classList.remove('hidden');
+                e.currentTarget.classList.add('border-green-500', 'text-green-600');
+                e.currentTarget.classList.remove('border-transparent', 'text-gray-500', 'hover:border-gray-300', 'hover:text-gray-700');
+            });
+        });
+
+        // 3. 聊天发送逻辑
+        const chatInput = document.getElementById('chatInput');
+        const chatWindow = document.getElementById('chatWindow');
+        const chatSendButton = document.getElementById('chatSendButton');
+
+        function appendMessage(sender, text) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('mb-4', 'flex');
+            messageDiv.classList.add(sender === 'user' ? 'justify-end' : 'justify-start');
+            const bubble = document.createElement('div');
+            bubble.classList.add('max-w-xs', 'p-3', 'rounded-xl', 'whitespace-pre-wrap');
+            // 将包含空格的类名字符串分割成单个类名，并添加到 classList 中
+            const colorClasses = sender === 'user' ? 'bg-green-500 text-white' : 'bg-gray-200 text-gray-800';
+            bubble.classList.add(...colorClasses.split(' '));
+            // 只有 AI 的消息需要进行 Markdown 渲染
+            if (sender === 'ai') {
+                bubble.innerHTML = simpleMarkdownToHtml(text);
+            } else {
+                // 用户消息只替换换行符
+                bubble.innerHTML = text.replace(/\n/g, '<br>');
+            }
+
+            messageDiv.appendChild(bubble);
+            chatWindow.appendChild(messageDiv);
+
+            // 滚动到底部
+            chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+
+        async function sendChatMessage() {
+            const userMessage = chatInput.value.trim();
+            if (!userMessage) return;
+
+            appendMessage('user', userMessage);
+            chatInput.value = '';
+
+            // 禁用输入和按钮
+            chatInput.disabled = true;
+            chatSendButton.disabled = true;
+
+            try {
+                // 发送消息到 Chat 会话
+                const response = await chat.sendMessage({ message: userMessage });
+
+                // 显示 AI 回复
+                appendMessage('ai', response.text);
+
+            } catch (error) {
+                console.error("聊天请求错误:", error);
+                // **新增：将错误信息也显示在聊天窗口中**
+                appendMessage('ai', `🤖 抱歉，聊天服务出现错误。请查看控制台获取详情。错误信息：${error.message}`);
+            } finally {
+                // 重新启用输入和按钮
+                chatInput.disabled = false;
+                chatSendButton.disabled = false;
+                chatInput.focus();
+            }
+        }
+
+        // 绑定事件
+        document.getElementById('generateButton').addEventListener('click', generateRecipe); // 图片识别按钮
+        chatSendButton.addEventListener('click', sendChatMessage); // 聊天发送按钮
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendChatMessage();
+            }
+        });
+
+    </script>
+</head>
+
+<body class="bg-gray-50 p-4 font-sans">
+    <div class="max-w-3xl mx-auto">
+        <header class="text-center py-8">
+            <h1 class="text-4xl font-extrabold text-green-600">✨ 李棒棒今天做什么吃呀</h1>
+            <p class="mt-2 text-gray-500">根据食材或心情，推荐专属菜谱。</p>
+        </header>
+
+        <div class="mb-6 border-b border-gray-200">
+            <nav class="-mb-px flex space-x-8" aria-label="Tabs">
+                <button id="tab-image"
+                    class="tab-button inline-flex items-center px-1 pb-3 text-lg font-medium border-b-2 border-green-500 text-green-600 focus:outline-none"
+                    data-target="content-image">
+                    📸 食材照片识别
+                </button>
+                <button id="tab-chat"
+                    class="tab-button inline-flex items-center px-1 pb-3 text-lg font-medium border-b-2 border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 focus:outline-none"
+                    data-target="content-chat">
+                    💡 心情问答推荐
+                </button>
+            </nav>
+        </div>
+
+        <div id="content-image" class="tab-content">
+            <section class="bg-white p-6 rounded-xl shadow-lg border border-green-200">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">上传食材照片，购买清单和小票也可以哦</h2>
+                <input type="file" id="imageUpload" accept="image/*"
+                    class="w-full p-3 border border-gray-300 rounded-lg mb-4 hover:border-green-500 transition duration-150 ease-in-out">
+
+                <button id="generateButton"
+                    class="w-full bg-green-500 text-white font-bold py-3 rounded-lg hover:bg-green-600 transition duration-300 shadow-md flex items-center justify-center">
+                    生成食谱！
+                    <svg id="loadingSpinner" class="animate-spin -ml-1 mr-3 h-5 w-5 text-white hidden"
+                        xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4">
+                        </circle>
+                        <path class="opacity-75" fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+                        </path>
+                    </svg>
+                </button>
+            </section>
+
+            <section id="resultArea" class="mt-8">
+            </section>
+
+        </div>
+
+        <div id="content-chat" class="tab-content hidden">
+            <section class="bg-white p-6 rounded-xl shadow-lg border border-green-200">
+                <h2 class="text-xl font-semibold mb-4 text-gray-700">问答推荐：根据您的偏好推荐菜谱与采购清单</h2>
+                <div id="chatWindow" class="h-96 overflow-y-auto p-4 border border-gray-300 rounded-lg mb-4 bg-gray-50">
+                    <div class="text-center text-gray-500">
+                        <p>🤖 我是您的美食顾问！今天心情如何？想吃点什么口味的呢？</p>
+                    </div>
+                </div>
+
+                <div class="flex">
+                    <input type="text" id="chatInput" placeholder="请输入您今天的心情、想吃的类型或口味..."
+                        class="flex-grow p-3 border border-gray-300 rounded-l-lg focus:border-green-500">
+                    <button id="chatSendButton"
+                        class="bg-green-500 text-white font-bold p-3 rounded-r-lg hover:bg-green-600 transition duration-300">
+                        发送
+                    </button>
+                </div>
+            </section>
+        </div>
+
+        <footer class="text-center mt-10 text-gray-400 text-sm">
+            <p>By 每天坐等投喂的喵喵桑</p>
+        </footer>
+    </div>
+</body>
+
+</html>
